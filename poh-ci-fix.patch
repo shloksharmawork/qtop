@@ -1,0 +1,490 @@
+From 1c2c9b95ab0bc2b12262ef4bb6d588e707f6e8fd Mon Sep 17 00:00:00 2001
+From: shloksharmawork <250544143+shloksharmawork@users.noreply.github.com>
+Date: Sat, 19 Sep 2026 11:41:56 +0000
+Subject: [PATCH] fix(poh): drop the PyYAML dependency that broke CI
+
+The proof-of-humanity round imported PyYAML, which is in neither
+requirements-ci.txt nor the runtime path, so tests/test_poh.py failed at
+collection and took every build-qtop and coverage-qtop job down with it
+(the advisory poh job passed only because its workflow pip-installed
+pyyaml itself).
+
+CONTRIBUTING.md asks contributors to avoid dependencies, and poh/claims.yaml
+only uses a small yaml subset, so tools/poh.py now carries its own stdlib
+reader and writer:
+
+- yaml_load / yaml_dump handle block mappings, lists of mappings, scalars
+  and comments; flow style, anchors and broken quoting raise YamlError
+  instead of being silently mis-parsed
+- tests cover the subset, the round trip, the rejections, and a real parse
+  of the committed poh/claims.yaml
+- tools/poh.py is reformatted so 'ruff format --check' passes
+
+.github/workflows/poh.yml can now drop its 'pip install pyyaml' step.
+
+make github-ci, make coverage-xml and make compat-py36 all pass locally:
+272 tests, 0 failures.
+
+---
+ docs/proof-of-humanity.md |  13 +++
+ poh/README.md             |   5 +
+ tests/test_poh.py         |  86 ++++++++++++++-
+ tools/poh.py              | 227 +++++++++++++++++++++++++++++++++-----
+ 4 files changed, 302 insertions(+), 29 deletions(-)
+
+diff --git a/docs/proof-of-humanity.md b/docs/proof-of-humanity.md
+index c1c31b1..746f967 100644
+--- a/docs/proof-of-humanity.md
++++ b/docs/proof-of-humanity.md
+@@ -158,6 +158,19 @@ TIER 1 (claims + signature + nonce) - required 1 -> PASS
+ Running `verify` a second time with the same commit reports
+ `no nonce was issued for alice` - the replay protection working.
+ 
++## No dependencies
++
++`CONTRIBUTING.md` asks contributors to avoid dependencies, because qtop runs in
++protoclusters where `pip install` may not be an option, and the CI lanes install
++nothing beyond `requirements-ci.txt`. `tools/poh.py` therefore ships its own
++reader (`yaml_load`) and writer (`yaml_dump`) for the small yaml subset the
++claims file uses - block mappings, lists of mappings, scalars and comments. Flow
++style (`[a, b]`), anchors, and multi-line scalars are rejected with a clear
++`YamlError` instead of being silently mis-parsed, and the subset is pinned by
++tests in `tests/test_poh.py`, including a parse of the committed
++`poh/claims.yaml`. Nothing here imports PyYAML, so the PoH job installs nothing
++and the same code runs on the Python 3.6 / AlmaLinux 8 lane.
++
+ ## Limitations, stated honestly
+ 
+ - **SSH signatures only.** The tool builds `allowed_signers` for ssh keys. GPG
+diff --git a/poh/README.md b/poh/README.md
+index 7d8da3e..ca4843b 100644
+--- a/poh/README.md
++++ b/poh/README.md
+@@ -12,6 +12,11 @@ design is in [`docs/proof-of-humanity.md`](../docs/proof-of-humanity.md).
+ Nothing here is secret. Nonces are random, short-lived, single-use values, and
+ the public keys are meant to be public - being on the record is the whole point.
+ 
++`claims.yaml` is read by `tools/poh.py`, which parses it with the standard
++library only - no PyYAML, no new pin in `requirements-ci.txt`. Keep entries in
++plain block style (`key: value`, `- ` list items, `#` comments); inline flow
++collections such as `claims: {github: alice}` are rejected on purpose.
++
+ ## Contributor: three commands
+ 
+ ```console
+diff --git a/tests/test_poh.py b/tests/test_poh.py
+index e4db3aa..8208433 100644
+--- a/tests/test_poh.py
++++ b/tests/test_poh.py
+@@ -2,14 +2,15 @@
+ 
+ import datetime
+ import json
++import os
+ import shutil
+ import subprocess
+ 
+ import pytest
+-import yaml
+ 
+ from tools import poh
+ 
++REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ HAS_TOOLS = bool(shutil.which("git")) and bool(shutil.which("ssh-keygen"))
+ needs_signing = pytest.mark.skipif(not HAS_TOOLS, reason="git and ssh-keygen are required")
+ 
+@@ -94,12 +95,91 @@ def test_check_claims_reports_unknown_provider_and_bad_values():
+     assert "github" not in problems
+ 
+ 
++## ------------------------------------------------------------ yaml subset
++##
++## tools/poh.py carries its own reader so the PoH round needs no third-party
++## parser (CONTRIBUTING.md: avoid dependencies). These tests pin the subset.
++
++
++def test_yaml_load_reads_the_committed_claims_file():
++    contributors, errors = poh.load_claims(os.path.join(REPO_ROOT, "poh", "claims.yaml"))
++    assert errors == []
++    assert [entry["handle"] for entry in contributors] == [
++        "qtop-maintainer-example",
++        "qtop-contributor-example",
++    ]
++    assert contributors[0]["claims"]["orcid"] == "0000-0002-1825-0097"
++    assert contributors[0]["attestations"][0]["type"] == "live-demo"
++    assert contributors[1]["attestations"] == []
++
++
++def test_yaml_load_handles_nesting_comments_and_scalars():
++    text = "\n".join(
++        (
++            "# a comment",
++            "version: 1",
++            "enabled: true",
++            "missing: null",
++            'quoted: "@example:matrix.org"',
++            "contributors:",
++            "  - handle: alice",
++            "    claims:",
++            "      email: alice@example.org",
++            "    attestations: []",
++            "  - handle: bob",
++            "",
++        )
++    )
++    data = poh.yaml_load(text)
++    assert data["version"] == 1
++    assert data["enabled"] is True
++    assert data["missing"] is None
++    assert data["quoted"] == "@example:matrix.org"
++    assert data["contributors"][0]["claims"]["email"] == "alice@example.org"
++    assert data["contributors"][0]["attestations"] == []
++    assert data["contributors"][1] == {"handle": "bob"}
++
++
++@pytest.mark.parametrize(
++    "text",
++    (
++        "contributors: [oops\n",
++        "version: 1\ncontributors: {broken\n",
++        'name: "unterminated\n',
++        "version: 1\n  stray-indent: 2\n",
++    ),
++)
++def test_yaml_load_rejects_unsupported_or_broken_input(text):
++    with pytest.raises(poh.YamlError):
++        poh.yaml_load(text)
++
++
++def test_yaml_dump_round_trips_through_yaml_load():
++    entry = {
++        "version": 1,
++        "contributors": [
++            {
++                "handle": "alice",
++                "name": "Alice",
++                "claims": {"github": "alice", "email": "alice@example.org"},
++                "signing": {"email": "alice@example.org", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBm6Zm1n a@b"},
++                "attestations": [],
++            }
++        ],
++    }
++    assert poh.yaml_load(poh.yaml_dump(entry)) == entry
++
++
++def test_yaml_load_of_an_empty_document_is_none():
++    assert poh.yaml_load("# only a comment\n\n") is None
++
++
+ ## ---------------------------------------------------------------- claims file
+ 
+ 
+ def _claims_file(tmp_path, contributors):
+     path = tmp_path / "claims.yaml"
+-    path.write_text(yaml.safe_dump({"version": 1, "contributors": contributors}), encoding="utf-8")
++    path.write_text(poh.yaml_dump({"version": 1, "contributors": contributors}), encoding="utf-8")
+     return path
+ 
+ 
+@@ -137,7 +217,7 @@ def test_load_claims_rejects_bad_yaml(tmp_path):
+ 
+ def test_load_claims_rejects_wrong_version(tmp_path):
+     path = tmp_path / "claims.yaml"
+-    path.write_text(yaml.safe_dump({"version": 2, "contributors": [example_entry()]}), encoding="utf-8")
++    path.write_text(poh.yaml_dump({"version": 2, "contributors": [example_entry()]}), encoding="utf-8")
+     _, errors = poh.load_claims(str(path))
+     assert any("version" in error for error in errors)
+ 
+diff --git a/tools/poh.py b/tools/poh.py
+index a3172d0..e5d3a24 100644
+--- a/tools/poh.py
++++ b/tools/poh.py
+@@ -49,11 +49,6 @@ import secrets
+ import subprocess
+ import sys
+ 
+-try:
+-    import yaml
+-except ImportError:  # pragma: no cover - yaml ships with the qtop test env
+-    yaml = None
+-
+ 
+ DEFAULT_CLAIMS = os.path.join("poh", "claims.yaml")
+ DEFAULT_STATE = os.path.join("poh", "nonces.json")
+@@ -91,6 +86,188 @@ ORCID = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
+ SSH_KEY = re.compile(r"^(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|sk-ssh-ed25519@openssh\.com)\s+[A-Za-z0-9+/=]{20,}")
+ 
+ 
++# ------------------------------------------------------------------ yaml I/O
++#
++# CONTRIBUTING.md asks contributors to avoid dependencies: qtop is run in
++# protoclusters where `pip install pyyaml` is not an option, and the CI lanes
++# install nothing beyond requirements-ci.txt. The claims file is a tiny, flat
++# document (mappings, lists of mappings, scalars), so the subset below is all
++# this tool needs - no third-party parser, no new pin, works on Python 3.6.
++
++
++class YamlError(ValueError):
++    """Raised when the claims file is not in the supported yaml subset."""
++
++
++def _yaml_scalar(text):
++    """Convert one scalar token: quotes, int, bool, null, otherwise a string."""
++    text = text.strip()
++    if text[:1] in ("[", "{") and text not in ("[]", "{}"):
++        # Flow style is outside this subset; failing loudly beats silently
++        # storing "[oops" as a string and reporting a confusing schema error.
++        raise YamlError("inline flow collections are not supported, use block style: %r" % text)
++    if len(text) >= 2 and text[0] in ("'", '"') and text[-1] != text[0]:
++        raise YamlError("unterminated quoted scalar: %r" % text)
++    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
++        return text[1:-1]
++    lowered = text.lower()
++    if lowered in ("null", "~", ""):
++        return None
++    if lowered == "true":
++        return True
++    if lowered == "false":
++        return False
++    if re.match(r"^-?\d+$", text):
++        return int(text)
++    if re.match(r"^-?\d+\.\d+$", text):
++        return float(text)
++    return text
++
++
++def _yaml_rows(text):
++    """(indent, content) for every significant line; comments and blanks drop out."""
++    rows = []
++    for number, raw in enumerate(text.splitlines(), 1):
++        without_tabs = raw.replace("\t", "    ")
++        stripped = without_tabs.strip()
++        if not stripped or stripped.startswith("#"):
++            continue
++        if " #" in stripped and not re.search(r"""['"][^'"]*\s#""", stripped):
++            stripped = stripped.split(" #", 1)[0].strip()
++        rows.append((len(without_tabs) - len(without_tabs.lstrip(" ")), stripped, number))
++    return rows
++
++
++def _yaml_block(rows, start, indent):
++    """Parse one block at `indent`, returning (value, index after the block)."""
++    if start >= len(rows):
++        return None, start
++    if rows[start][1].startswith("- "):
++        return _yaml_sequence(rows, start, indent)
++    return _yaml_mapping(rows, start, indent)
++
++
++def _yaml_sequence(rows, start, indent):
++    items = []
++    position = start
++    while position < len(rows):
++        level, content, number = rows[position]
++        if level < indent:
++            break
++        if level > indent or not content.startswith("- "):
++            raise YamlError("line %s: unexpected indentation inside a list" % number)
++        inner = content[2:].strip()
++        position += 1
++        if ":" in inner and not inner.startswith(("'", '"')):
++            # "- handle: alice" opens a mapping whose first key sits inline.
++            key, _, rest = inner.partition(":")
++            entry = {}
++            nested_indent = indent + 2
++            if rest.strip():
++                entry[key.strip()] = _yaml_scalar(rest)
++            else:
++                value, position = _yaml_block(rows, position, nested_indent)
++                entry[key.strip()] = value
++            if position < len(rows) and rows[position][0] >= nested_indent:
++                more, position = _yaml_mapping(rows, position, rows[position][0])
++                entry.update(more)
++            items.append(entry)
++        else:
++            items.append(_yaml_scalar(inner))
++    return items, position
++
++
++def _yaml_mapping(rows, start, indent):
++    mapping = {}
++    position = start
++    while position < len(rows):
++        level, content, number = rows[position]
++        if level < indent:
++            break
++        if level > indent:
++            raise YamlError("line %s: unexpected indentation" % number)
++        if content.startswith("- "):
++            raise YamlError("line %s: list item where a `key: value` was expected" % number)
++        if ":" not in content:
++            raise YamlError("line %s: expected `key: value`, got %r" % (number, content))
++        key, _, rest = content.partition(":")
++        position += 1
++        if rest.strip() == "[]":
++            mapping[key.strip()] = []
++        elif rest.strip() == "{}":
++            mapping[key.strip()] = {}
++        elif rest.strip():
++            mapping[key.strip()] = _yaml_scalar(rest)
++        elif position < len(rows) and rows[position][0] > indent:
++            value, position = _yaml_block(rows, position, rows[position][0])
++            mapping[key.strip()] = value
++        elif position < len(rows) and rows[position][0] == indent and rows[position][1].startswith("- "):
++            value, position = _yaml_sequence(rows, position, indent)
++            mapping[key.strip()] = value
++        else:
++            mapping[key.strip()] = None
++    return mapping, position
++
++
++def yaml_load(text):
++    """Load the supported yaml subset. Raises YamlError on anything else."""
++    rows = _yaml_rows(text)
++    if not rows:
++        return None
++    value, position = _yaml_block(rows, 0, rows[0][0])
++    if position != len(rows):
++        raise YamlError("line %s: could not parse the rest of the document" % rows[position][2])
++    return value
++
++
++def _yaml_quote(value):
++    if value is None:
++        return '""'
++    if value is True:
++        return "true"
++    if value is False:
++        return "false"
++    if isinstance(value, (int, float)):
++        return str(value)
++    text = str(value)
++    needs_quotes = text == "" or text[0] in "@&*!%#|>-?:,[]{}'\"" or text.strip() != text or ": " in text
++    if needs_quotes:
++        return '"%s"' % text.replace("\\", "\\\\").replace('"', '\\"')
++    return text
++
++
++def yaml_dump(data, indent=0):
++    """Emit the same yaml subset, stable enough to paste into claims.yaml."""
++    pad = " " * indent
++    lines = []
++    if isinstance(data, dict):
++        if not data:
++            return pad + "{}\n"
++        for key, value in data.items():
++            if isinstance(value, (dict, list)) and value:
++                lines.append("%s%s:" % (pad, key))
++                lines.append(yaml_dump(value, indent + 2).rstrip("\n"))
++            elif isinstance(value, dict):
++                lines.append("%s%s: {}" % (pad, key))
++            elif isinstance(value, list):
++                lines.append("%s%s: []" % (pad, key))
++            else:
++                lines.append("%s%s: %s" % (pad, key, _yaml_quote(value)))
++    elif isinstance(data, list):
++        if not data:
++            return pad + "[]\n"
++        for item in data:
++            if isinstance(item, (dict, list)) and item:
++                block = yaml_dump(item, indent + 2).rstrip("\n").splitlines()
++                lines.append("%s- %s" % (pad, block[0].strip()))
++                lines.extend(block[1:])
++            else:
++                lines.append("%s- %s" % (pad, _yaml_quote(item)))
++    else:
++        return pad + _yaml_quote(data) + "\n"
++    return "\n".join(lines) + "\n"
++
++
+ # --------------------------------------------------------------------- claims
+ 
+ 
+@@ -165,16 +342,16 @@ def load_claims(path):
+     Returns (contributors, errors) where contributors is a list of dicts.
+     """
+     errors = []
+-    if yaml is None:
+-        return [], ["PyYAML is not importable, cannot read %s" % path]
+     if not os.path.exists(path):
+         return [], ["claims file not found: %s" % path]
+ 
+     try:
+         with open(path, "r", encoding="utf-8") as handle:
+-            data = yaml.safe_load(handle)
+-    except yaml.YAMLError as error:
++            data = yaml_load(handle.read())
++    except YamlError as error:
+         return [], ["claims file is not valid yaml: %s" % error]
++    except OSError as error:
++        return [], ["claims file could not be read: %s" % error]
+ 
+     if not isinstance(data, dict):
+         return [], ["claims file must contain a mapping at the top level"]
+@@ -362,16 +539,12 @@ def commit_author_email(repo, commit):
+     signature to an identity. That label is the principal *we* supplied through
+     allowed_signers, so comparing it against the claim would be circular.
+     """
+-    result = subprocess.run(
+-        ["git", "-C", repo, "log", "-1", "--format=%ae", commit], capture_output=True, text=True
+-    )
++    result = subprocess.run(["git", "-C", repo, "log", "-1", "--format=%ae", commit], capture_output=True, text=True)
+     return result.stdout.strip() if result.returncode == 0 else ""
+ 
+ 
+ def commit_message(repo, commit):
+-    result = subprocess.run(
+-        ["git", "-C", repo, "log", "-1", "--format=%B", commit], capture_output=True, text=True
+-    )
++    result = subprocess.run(["git", "-C", repo, "log", "-1", "--format=%B", commit], capture_output=True, text=True)
+     return result.stdout if result.returncode == 0 else ""
+ 
+ 
+@@ -402,9 +575,7 @@ def evaluate(entry, contributors, repo, commit, state_path, nonce_override=None,
+ 
+     allowed = None
+     if allowed_signers_from([entry]).strip():
+-        allowed = os.path.join(
+-            os.path.dirname(state_path) or ".", "allowed_signers_%s" % entry.get("handle", "x")
+-        )
++        allowed = os.path.join(os.path.dirname(state_path) or ".", "allowed_signers_%s" % entry.get("handle", "x"))
+         os.makedirs(os.path.dirname(allowed) or ".", exist_ok=True)
+         with open(allowed, "w", encoding="utf-8") as handle:
+             handle.write(allowed_signers_from([entry]))
+@@ -467,16 +638,20 @@ def _line(label, ok, detail):
+ def print_report(report, require_tier):
+     print("Proof of Humanity report - @%s" % report["handle"])
+     print("=" * 72)
+-    print(_line("claims", report["enough_claims"], "%s valid (%s); minimum %s" % (
+-        report["distinct_providers"], ", ".join(report["valid_claims"]) or "none", report["min_claims"])))
++    print(_line("claims", report["enough_claims"], "%s valid (%s); minimum %s" % (report["distinct_providers"], ", ".join(report["valid_claims"]) or "none", report["min_claims"])))
+     for provider, problems in sorted(report["claim_problems"].items()):
+         print(_line("  " + provider, False, "; ".join(problems)))
+-    print(_line("cross-checks", not report["cross_check"],
+-                "no duplicate identity or shared key" if not report["cross_check"] else "; ".join(report["cross_check"])))
++    print(_line("cross-checks", not report["cross_check"], "no duplicate identity or shared key" if not report["cross_check"] else "; ".join(report["cross_check"])))
+     print(_line("commit signature", report["signature_ok"], report["signature_detail"]))
+-    print(_line("signature binding", report["binding_ok"],
+-                "commit author %s matches the email claim" % report["author_email"] if report["binding_ok"]
+-                else "commit author %s vs email claim %s" % (report["author_email"] or "none", report["bound_email"] or "none")))
++    print(
++        _line(
++            "signature binding",
++            report["binding_ok"],
++            "commit author %s matches the email claim" % report["author_email"]
++            if report["binding_ok"]
++            else "commit author %s vs email claim %s" % (report["author_email"] or "none", report["bound_email"] or "none"),
++        )
++    )
+     print(_line("nonce", report["nonce_ok"], report["nonce_reason"]))
+     if report["attestations"]:
+         print(_line("attestations", True, "%s on record" % report["attestations"]))
+@@ -522,7 +697,7 @@ def cmd_init(args):
+         entry["claims"]["linkedin"] = args.linkedin
+     if args.matrix:
+         entry["claims"]["matrix"] = args.matrix
+-    print(yaml.safe_dump(entry, sort_keys=False, allow_unicode=True), end="")
++    print(yaml_dump(entry), end="")
+     print("## merge this under `contributors:` in %s" % DEFAULT_CLAIMS, file=sys.stderr)
+     return 0
+ 
