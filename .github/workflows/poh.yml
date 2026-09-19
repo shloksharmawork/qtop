@@ -1,0 +1,41 @@
+##
+## qtop is a tool to monitor queuing systems - https://github.com/qtop/qtop
+##
+## SPDX-License-Identifier: MIT
+##
+## Advisory proof-of-humanity round for pull requests (issue #551).
+## This job never fails a pull request: it reports the tier so a maintainer can
+## see, at a glance, whether the contributor completed a PoH round.
+name: proof-of-humanity
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  poh:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # tools/poh.py is stdlib-only on purpose (CONTRIBUTING.md: avoid
+      # dependencies), so this job installs nothing.
+
+      - name: Proof-of-humanity round (advisory)
+        run: |
+          python tools/poh.py verify \
+            --handle "${{ github.event.pull_request.user.login }}" \
+            --commit "${{ github.event.pull_request.head.sha }}" \
+            --claims poh/claims.yaml \
+            --state poh/nonces.json \
+            --require-tier 1 \
+          || echo "::notice::No completed PoH round for this author yet - see docs/proof-of-humanity.md. This is advisory and does not block the pull request."

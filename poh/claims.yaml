@@ -1,0 +1,43 @@
+## Proof-of-Humanity claims file - see docs/proof-of-humanity.md (issue #551).
+##
+## One entry per contributor. The signing key is pinned here on purpose: it is
+## what makes a sock puppet expensive, because the nonce in a pull request has
+## to be signed by a key the project already has on record.
+##
+## Add yourself:
+##   1. python3 tools/poh.py init --handle <github> --email <mail>
+##   2. paste the result below, filling in your public key:
+##        cat ~/.ssh/id_ed25519.pub
+##   3. ask a maintainer for a nonce, then sign your commit with -S
+##
+## The entries below are examples. Replace them with real contributors.
+version: 1
+
+contributors:
+  - handle: qtop-maintainer-example
+    name: Example Maintainer
+    claims:
+      github: qtop-maintainer-example
+      email: maintainer@example.org
+      orcid: 0000-0002-1825-0097
+    signing:
+      email: maintainer@example.org
+      key: <paste `cat ~/.ssh/id_ed25519.pub` here>
+    attestations:
+      - type: live-demo
+        by: maintainer
+        date: 2026-09-19
+        ref: https://github.com/qtop/qtop/issues/551
+
+  - handle: qtop-contributor-example
+    name: Example Contributor
+    claims:
+      github: qtop-contributor-example
+      email: contributor@example.org
+      orcid: 0000-0001-5109-3700
+      linkedin: https://www.linkedin.com/in/example-contributor
+      matrix: "@example:matrix.org"
+    signing:
+      email: contributor@example.org
+      key: <paste `cat ~/.ssh/id_ed25519.pub` here>
+    attestations: []
