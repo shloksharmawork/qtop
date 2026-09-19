@@ -27,8 +27,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install helper dependency
-        run: python -m pip install --quiet pyyaml
+      # tools/poh.py is stdlib-only on purpose (CONTRIBUTING.md: avoid
+      # dependencies), so this job installs nothing.
 
       - name: Proof-of-humanity round (advisory)
         run: |

@@ -2,14 +2,15 @@
 
 import datetime
 import json
+import os
 import shutil
 import subprocess
 
 import pytest
-import yaml
 
 from tools import poh
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HAS_TOOLS = bool(shutil.which("git")) and bool(shutil.which("ssh-keygen"))
 needs_signing = pytest.mark.skipif(not HAS_TOOLS, reason="git and ssh-keygen are required")
 
@@ -94,12 +95,91 @@ def test_check_claims_reports_unknown_provider_and_bad_values():
     assert "github" not in problems
 
 
+## ------------------------------------------------------------ yaml subset
+##
+## tools/poh.py carries its own reader so the PoH round needs no third-party
+## parser (CONTRIBUTING.md: avoid dependencies). These tests pin the subset.
+
+
+def test_yaml_load_reads_the_committed_claims_file():
+    contributors, errors = poh.load_claims(os.path.join(REPO_ROOT, "poh", "claims.yaml"))
+    assert errors == []
+    assert [entry["handle"] for entry in contributors] == [
+        "qtop-maintainer-example",
+        "qtop-contributor-example",
+    ]
+    assert contributors[0]["claims"]["orcid"] == "0000-0002-1825-0097"
+    assert contributors[0]["attestations"][0]["type"] == "live-demo"
+    assert contributors[1]["attestations"] == []
+
+
+def test_yaml_load_handles_nesting_comments_and_scalars():
+    text = "\n".join(
+        (
+            "# a comment",
+            "version: 1",
+            "enabled: true",
+            "missing: null",
+            'quoted: "@example:matrix.org"',
+            "contributors:",
+            "  - handle: alice",
+            "    claims:",
+            "      email: alice@example.org",
+            "    attestations: []",
+            "  - handle: bob",
+            "",
+        )
+    )
+    data = poh.yaml_load(text)
+    assert data["version"] == 1
+    assert data["enabled"] is True
+    assert data["missing"] is None
+    assert data["quoted"] == "@example:matrix.org"
+    assert data["contributors"][0]["claims"]["email"] == "alice@example.org"
+    assert data["contributors"][0]["attestations"] == []
+    assert data["contributors"][1] == {"handle": "bob"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "contributors: [oops\n",
+        "version: 1\ncontributors: {broken\n",
+        'name: "unterminated\n',
+        "version: 1\n  stray-indent: 2\n",
+    ),
+)
+def test_yaml_load_rejects_unsupported_or_broken_input(text):
+    with pytest.raises(poh.YamlError):
+        poh.yaml_load(text)
+
+
+def test_yaml_dump_round_trips_through_yaml_load():
+    entry = {
+        "version": 1,
+        "contributors": [
+            {
+                "handle": "alice",
+                "name": "Alice",
+                "claims": {"github": "alice", "email": "alice@example.org"},
+                "signing": {"email": "alice@example.org", "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBm6Zm1n a@b"},
+                "attestations": [],
+            }
+        ],
+    }
+    assert poh.yaml_load(poh.yaml_dump(entry)) == entry
+
+
+def test_yaml_load_of_an_empty_document_is_none():
+    assert poh.yaml_load("# only a comment\n\n") is None
+
+
 ## ---------------------------------------------------------------- claims file
 
 
 def _claims_file(tmp_path, contributors):
     path = tmp_path / "claims.yaml"
-    path.write_text(yaml.safe_dump({"version": 1, "contributors": contributors}), encoding="utf-8")
+    path.write_text(poh.yaml_dump({"version": 1, "contributors": contributors}), encoding="utf-8")
     return path
 
 
@@ -137,7 +217,7 @@ def test_load_claims_rejects_bad_yaml(tmp_path):
 
 def test_load_claims_rejects_wrong_version(tmp_path):
     path = tmp_path / "claims.yaml"
-    path.write_text(yaml.safe_dump({"version": 2, "contributors": [example_entry()]}), encoding="utf-8")
+    path.write_text(poh.yaml_dump({"version": 2, "contributors": [example_entry()]}), encoding="utf-8")
     _, errors = poh.load_claims(str(path))
     assert any("version" in error for error in errors)
 

@@ -12,6 +12,11 @@ design is in [`docs/proof-of-humanity.md`](../docs/proof-of-humanity.md).
 Nothing here is secret. Nonces are random, short-lived, single-use values, and
 the public keys are meant to be public - being on the record is the whole point.
 
+`claims.yaml` is read by `tools/poh.py`, which parses it with the standard
+library only - no PyYAML, no new pin in `requirements-ci.txt`. Keep entries in
+plain block style (`key: value`, `- ` list items, `#` comments); inline flow
+collections such as `claims: {github: alice}` are rejected on purpose.
+
 ## Contributor: three commands
 
 ```console
