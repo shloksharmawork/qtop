@@ -158,6 +158,19 @@ TIER 1 (claims + signature + nonce) - required 1 -> PASS
 Running `verify` a second time with the same commit reports
 `no nonce was issued for alice` - the replay protection working.
 
+## No dependencies
+
+`CONTRIBUTING.md` asks contributors to avoid dependencies, because qtop runs in
+protoclusters where `pip install` may not be an option, and the CI lanes install
+nothing beyond `requirements-ci.txt`. `tools/poh.py` therefore ships its own
+reader (`yaml_load`) and writer (`yaml_dump`) for the small yaml subset the
+claims file uses - block mappings, lists of mappings, scalars and comments. Flow
+style (`[a, b]`), anchors, and multi-line scalars are rejected with a clear
+`YamlError` instead of being silently mis-parsed, and the subset is pinned by
+tests in `tests/test_poh.py`, including a parse of the committed
+`poh/claims.yaml`. Nothing here imports PyYAML, so the PoH job installs nothing
+and the same code runs on the Python 3.6 / AlmaLinux 8 lane.
+
 ## Limitations, stated honestly
 
 - **SSH signatures only.** The tool builds `allowed_signers` for ssh keys. GPG
